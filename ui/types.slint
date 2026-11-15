@@ -19,6 +19,21 @@ export enum View {
     hardware,     // opened from the settings
 }
 
+// How an OpenRig FX plugin's block looks, wherever it is drawn (rack, Add
+// effect page, store)
+export struct BlockFace {
+    suite: bool,         // one of the OpenRig FX suite (by its URI, even before it is installed)
+    look: string,        // "" (generic), "basic" or "signature"
+    name: string,        // the name the block carries ("Echo", "GREEN")
+    title: string,       // the name on the editor's plate
+    tagline: string,     // signature plate: what it is, under its name
+    glyph: string,       // basic block: a drawing of what it does (path, 50 x 14)
+    plate: image,        // signature block: its plate (empty when flat)
+    plate-color: color,
+    knob-style: string,  // "plain", "skirted", "chickenhead", "domed"
+    steel: bool,         // steel knob caps (very dark plate)
+}
+
 // Positioned layout node from the backend layout engine.
 // Coordinates are in "layout units": main line at y = 0, split branches one
 // or more rows of 64 above (top) / below (bottom) their split, depending on
@@ -42,6 +57,7 @@ export struct PositionedNode {
     t3k: bool,           // loads a TONE3000 download: shows the T3K mark
     picture: image,      // its store picture, drawn instead of the gear
     has-picture: bool,
+    faceplate: BlockFace,
 }
 
 // Where a dragged block can be dropped (layout units)
@@ -96,6 +112,7 @@ export struct PluginItem {
     color: color,       // colour of its family, as in the rack
     picture: image,     // its store picture, once downloaded
     has-picture: bool,
+    faceplate: BlockFace,
 }
 
 export struct PresetInfo {
@@ -333,6 +350,7 @@ export struct CatalogItem {
     picture: image,         // the author's own picture, when it has one
     has-picture: bool,      // else the gear is drawn
     picture-credit: string, // "Michael Willis, GPL-3.0"
+    faceplate: BlockFace,   // its face (the look once installed)
 }
 
 // A family chip of the store, with how many entries match the search
@@ -396,10 +414,18 @@ export struct DynLive {
     history-reduction: string,
 }
 
-// A line of a delay's echoes: where across, how high, 0 to 1
+// A line of a delay's echoes: where across, where it stands and how high,
+// 0 to 1 from the bottom
 export struct EchoTap {
     x: float,
+    base: float,
     height: float,
+}
+
+// A beat of the tempo across a delay's echoes (`bar`: the first of a bar)
+export struct EchoBeat {
+    x: float,
+    bar: bool,
 }
 
 // What a delay, reverb, drive, modulation or cabinet block does to the sound
@@ -409,16 +435,20 @@ export struct ScopeView {
     shown: bool,
     kind: string,           // "Delay", "Reverb"…
     summary: string,        // "250 ms · 6 echoes"
-    // Square on the left: "history", "wave" (the waves in and out) or ""
+    // Square on the left: "history" or ""
     left: string,
     // Wide plot: "history" (levels over the last seconds), "spectrum" or
     // "echoes"
     right: string,
+    // Over the spectrum: the block's response at its settings (path)
+    response: string,
     // The dry sound and the echoes, as lines up from the bottom
     echo-taps: [EchoTap],
     echo-span: string,      // time across the box, "1.2 s"
     echo-time: PlotHandle,  // the first echo
     echo-feedback: PlotHandle, // the second
+    echo-beats: [EchoBeat],    // the tempo's beats behind them
+    echo-lanes: bool,          // ping-pong: left echoes up, right ones down
 }
 
 // What it does right now
@@ -426,10 +456,6 @@ export struct ScopeLive {
     // Last seconds, path commands
     history-in: string,
     history-out: string,
-    // The waves in and out, in the square, empty in silence
-    wave-in: string,
-    wave-out: string,
-    gain: string,           // output against input, "+12.5 dB"
 }
 
 // A setting of pedalboard.txt in Settings → Audio & system

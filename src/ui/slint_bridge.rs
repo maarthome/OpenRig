@@ -7,7 +7,8 @@ use chrono::{Local, TimeZone};
 use crate::audio::split_chain::walk;
 use crate::audio::ChainNode;
 use crate::monitor::Levels;
-use crate::plugins::scanner::{self, PluginCategory, PortInfo};
+use crate::plugins::faceplate::Faceplate;
+use crate::plugins::scanner::{self, PluginCategory, PluginInfo, PortInfo};
 use crate::state::AppState;
 
 /// One entry of the plugin browser
@@ -23,6 +24,8 @@ pub struct PluginView {
     pub hint: String,
     /// Colour of its family (RGB), as drawn in the rack
     pub color: u32,
+    /// OpenRig FX look, if it is one of them
+    pub faceplate: Option<Faceplate>,
 }
 
 /// How a parameter is edited
@@ -60,8 +63,14 @@ pub struct ParameterView {
     pub option_values: Vec<f32>,
     /// Value shown as "Off"
     pub off_value: Option<f32>,
-    /// Shown in the rack's knob strip
-    pub in_strip: bool,
+    /// Place in the rack's knob strip; `None`: left out of it
+    pub strip_pos: Option<usize>,
+    /// Rank in the knob strip an OpenRig FX plugin asks for
+    /// (`openrig:primary`)
+    pub primary: Option<u32>,
+    /// Place on an OpenRig FX faceplate (`openrig:order`); `None`: only in
+    /// the full control list
+    pub face_order: Option<u32>,
 }
 
 impl ParameterView {
@@ -92,7 +101,27 @@ impl ParameterView {
                 .collect(),
             option_values: port.scale_points.iter().map(|(_, v)| *v).collect(),
             off_value: port.off_value,
-            in_strip: true,
+            strip_pos: None,
+            primary: port.primary,
+            face_order: port.order,
+        }
+    }
+}
+
+/// Places in the rack's knob strip of `parameters` (in the order shown):
+/// as arranged in the editor, else the plugin's primary controls first
+/// (`openrig:primary`), then as shown; none for those left out
+fn place_in_strip(parameters: &mut [ParameterView], layout: &crate::state::param_layout::Layout) {
+    let mut strip: Vec<(usize, (usize, u32))> = parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| layout.in_strip(&p.symbol))
+        .map(|(i, p)| (i, (layout.rank(&p.symbol), p.primary.unwrap_or(u32::MAX))))
+        .collect();
+    strip.sort_by_key(|&(_, key)| key);
+    for (pos, (i, _)) in strip.into_iter().enumerate() {
+        if let Some(p) = parameters.get_mut(i) {
+            p.strip_pos = Some(pos);
         }
     }
 }
@@ -116,6 +145,8 @@ pub struct SelectedNodeView {
     pub file_types: String,
     /// Colour of the block when the user has not chosen one (RGB)
     pub auto_color: u32,
+    /// OpenRig FX look, if the plugin is one of them
+    pub faceplate: Option<Faceplate>,
 }
 
 #[derive(Clone, Debug)]
@@ -169,7 +200,8 @@ pub fn plugin_views(state: &AppState) -> Vec<PluginView> {
             category: format!("{:?}", info.category),
             kind: scanner::shape(&info.uri).to_string(),
             hint: scanner::hint(&info.uri).to_string(),
-            color: default_block_color(scanner::shape(&info.uri), Some(&info.category)),
+            color: rack_color(None, &info.uri, Some(info)).1,
+            faceplate: info.faceplate.clone(),
         })
         .collect();
     // Built-in blocks first: they are what the pedalboard is made for; the
@@ -249,17 +281,18 @@ pub fn selected_node_view(state: &AppState, instance_id: usize) -> Option<Select
                         .collect()
                 })
                 .unwrap_or_default();
-            // As arranged in the editor
+            // As arranged in the editor, else in the plugin's face order,
+            // else in its port order
             let layout = state.param_layout(uri);
-            parameters.sort_by_key(|p| layout.rank(&p.symbol));
-            for p in &mut parameters {
-                p.in_strip = layout.in_strip(&p.symbol);
-            }
+            parameters.sort_by_key(|p| (layout.rank(&p.symbol), p.face_order.unwrap_or(u32::MAX)));
+            place_in_strip(&mut parameters, &layout);
             Some(SelectedNodeView {
                 instance_id,
                 uri: uri.clone(),
                 name: state.plugin_name(uri),
+                // No family rather than "Unknown"
                 category: info
+                    .filter(|i| i.category != PluginCategory::Unknown)
                     .map(|i| format!("{:?}", i.category))
                     .unwrap_or_default(),
                 bypassed: !enabled,
@@ -274,7 +307,8 @@ pub fn selected_node_view(state: &AppState, instance_id: usize) -> Option<Select
                     .map(|e| format!(".{e}"))
                     .collect::<Vec<_>>()
                     .join(", "),
-                auto_color: default_block_color(scanner::shape(uri), info.map(|i| &i.category)),
+                auto_color: rack_color(None, uri, info).1,
+                faceplate: info.and_then(|i| i.faceplate.clone()),
             })
         }
         ChainNode::Split {
@@ -292,7 +326,8 @@ pub fn selected_node_view(state: &AppState, instance_id: usize) -> Option<Select
             file: String::new(),
             file_label: String::new(),
             file_types: String::new(),
-            auto_color: default_block_color("", None),
+            auto_color: rack_color(None, "", None).1,
+            faceplate: None,
         }),
     }
 }
@@ -377,13 +412,9 @@ pub const BLOCK_COLORS: [(&str, &str, u32); 10] = [
     ("silver", "Silver", 0x696c72),
 ];
 
-/// Colour of a block the user has not coloured: its family, like the
-/// category colours of hardware modelers (amps red, delays green...)
-pub fn default_block_color(shape: &str, category: Option<&PluginCategory>) -> u32 {
-    block_color(default_block_color_name(shape, category)).unwrap_or(BLOCK_COLORS[0].2)
-}
-
-/// Name of the colour of a block the user has not coloured
+/// Name of the colour of a block the user has not coloured: its family,
+/// like the category colours of hardware modelers (amps red, delays
+/// green...)
 pub fn default_block_color_name(shape: &str, category: Option<&PluginCategory>) -> &'static str {
     match (shape, category) {
         ("amp" | "combo", _) => "red",
@@ -399,20 +430,26 @@ pub fn default_block_color_name(shape: &str, category: Option<&PluginCategory>) 
     }
 }
 
-/// Colour a block is drawn in, name and RGB: the user's `chosen` one when
-/// it is a colour of the palette, else its family's
+/// Colour the block of plugin `uri` is drawn in, name of the palette and
+/// RGB: the user's `chosen` colour when it is one of the palette, else its
+/// plate's tint (signature OpenRig FX plugins; named after its family),
+/// else its family's
 pub fn rack_color(
     chosen: Option<&str>,
-    shape: &str,
-    category: Option<&PluginCategory>,
+    uri: &str,
+    info: Option<&PluginInfo>,
 ) -> (&'static str, u32) {
-    chosen
-        .and_then(|name| BLOCK_COLORS.iter().skip(1).find(|(n, _, _)| *n == name))
-        .map(|(name, _, rgb)| (*name, *rgb))
-        .unwrap_or_else(|| {
-            let name = default_block_color_name(shape, category);
-            (name, block_color(name).unwrap_or(BLOCK_COLORS[0].2))
-        })
+    if let Some(&(name, _, rgb)) =
+        chosen.and_then(|chosen| BLOCK_COLORS.iter().skip(1).find(|(n, _, _)| *n == chosen))
+    {
+        return (name, rgb);
+    }
+    let name = default_block_color_name(scanner::shape(uri), info.map(|i| &i.category));
+    let rgb = match info.and_then(|i| i.faceplate.as_ref()?.plate) {
+        Some(plate) => plate.tint(),
+        None => block_color(name).unwrap_or(BLOCK_COLORS[0].2),
+    };
+    (name, rgb)
 }
 
 /// RGB of a colour name; None for the default look or an unknown name
@@ -525,17 +562,86 @@ mod tests {
     #[test]
     fn blocks_take_the_colour_of_their_family() {
         let color = |name| block_color(name).unwrap();
-        assert_eq!(default_block_color("amp", None), color("red"));
-        assert_eq!(default_block_color("cab", None), color("orange"));
+        let nam = scanner::FILE_BLOCKS
+            .iter()
+            .find(|b| b.shape == "amp")
+            .unwrap()
+            .uri;
+        assert_eq!(rack_color(None, nam, None), ("red", color("red")));
+        assert_eq!(rack_color(Some("teal"), nam, None), ("teal", color("teal")));
+        assert_eq!(rack_color(Some("auto"), nam, None), ("red", color("red")));
+        assert_eq!(default_block_color_name("cab", None), "orange");
         assert_eq!(
-            default_block_color("", Some(&PluginCategory::Delay)),
-            color("green")
+            default_block_color_name("", Some(&PluginCategory::Delay)),
+            "green"
         );
         assert_eq!(
-            default_block_color("", Some(&PluginCategory::Unknown)),
-            color("silver")
+            default_block_color_name("", Some(&PluginCategory::Unknown)),
+            "silver"
         );
-        assert_eq!(default_block_color("", None), color("silver"));
+        assert_eq!(rack_color(None, "", None), ("silver", color("silver")));
+    }
+
+    #[test]
+    fn a_plate_tints_its_block_unless_the_user_chose_a_colour() {
+        use crate::plugins::faceplate::{Finish, KnobStyle, Plate};
+        let plate = Plate {
+            color: 0x2e5a3a,
+            knob_style: KnobStyle::Skirted,
+            finish: Finish::Painted,
+            wear: 0.0,
+            seed: 1,
+        };
+        let info = PluginInfo {
+            uri: "https://openrig.eu/plugins/green-drive".into(),
+            category: PluginCategory::Distortion,
+            faceplate: Some(Faceplate {
+                plate: Some(plate),
+                name: "GREEN".into(),
+                short_name: "GREEN".into(),
+                tagline: String::new(),
+                view: None,
+            }),
+            ..PluginInfo::default()
+        };
+        // Named after its family (rigs keep a palette name), drawn in its tint
+        assert_eq!(
+            rack_color(None, &info.uri, Some(&info)),
+            ("yellow", plate.tint())
+        );
+        assert_eq!(
+            rack_color(Some("blue"), &info.uri, Some(&info)),
+            ("blue", block_color("blue").unwrap())
+        );
+    }
+
+    #[test]
+    fn the_strip_puts_primary_controls_first_unless_arranged() {
+        use crate::state::param_layout::Layout;
+        let param = |symbol: &str, primary: Option<u32>| ParameterView {
+            symbol: symbol.into(),
+            primary,
+            ..ParameterView::new(0, &PortInfo::default(), 0.0)
+        };
+        let places = |layout: &Layout| {
+            let mut parameters = vec![
+                param("mode", None),
+                param("time", Some(1)),
+                param("tone", None),
+                param("level", Some(2)),
+            ];
+            place_in_strip(&mut parameters, layout);
+            parameters.iter().map(|p| p.strip_pos).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            places(&Layout::default()),
+            [Some(2), Some(0), Some(3), Some(1)]
+        );
+        let arranged = Layout {
+            order: vec!["tone".into()],
+            hidden: vec!["mode".into()],
+        };
+        assert_eq!(places(&arranged), [None, Some(1), Some(0), Some(2)]);
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod midi_io;
 mod midi_ui;
 #[cfg(feature = "midi")]
 mod network_midi_ui;
+mod plates;
 mod plugin_view;
 #[cfg(feature = "remote")]
 mod remote_ui;
@@ -292,11 +293,16 @@ pub(crate) fn refresh_chain(app: &App, state: &AppState) {
         ..
     } = chain_layout::layout_chain_with(&chain.nodes, &state.signal_map(&chain));
 
+    let plate_size = plates::block_size(app, 1.0);
     let nodes: Vec<PositionedNode> = nodes
         .into_iter()
         .map(|n| {
-            // Only a picture of the gear's face stands for the block
-            let face = if n.is_split {
+            // An OpenRig FX block is drawn in its own look; else only a
+            // picture of the gear's face stands for the block
+            let look = (!n.is_split)
+                .then(|| state.plugin_faceplate(&n.uri))
+                .flatten();
+            let face = if n.is_split || look.is_some() {
                 None
             } else {
                 store_picture(&n.uri).filter(|(_, face)| *face)
@@ -330,6 +336,12 @@ pub(crate) fn refresh_chain(app: &App, state: &AppState) {
                         .is_some_and(|p| p.tone3000),
                 has_picture: face.is_some(),
                 picture: face.map(|(p, _)| p).unwrap_or_default(),
+                faceplate: plates::block_face(
+                    &n.uri,
+                    look.as_ref(),
+                    state.plugin_category(&n.uri).as_ref(),
+                    plate_size,
+                ),
             }
         })
         .collect();
@@ -424,7 +436,8 @@ pub(crate) fn block_name(
     }
 }
 
-/// Colour of a block: the user's, else the colour of its family
+/// Colour of a block: the user's, else its plate's, else the colour of its
+/// family
 pub(crate) fn block_tint(
     state: &AppState,
     chain: &EffectChainState,
@@ -432,8 +445,7 @@ pub(crate) fn block_tint(
     uri: &str,
 ) -> u32 {
     let chosen = chain.colors.get(&instance_id).map(String::as_str);
-    let category = state.plugin_category(uri);
-    views::rack_color(chosen, scanner::shape(uri), category.as_ref()).1
+    views::rack_color(chosen, uri, state.lv2_host.scanner().find_by_uri(uri)).1
 }
 
 /// URI of the plugin `instance_id`, if it is one
@@ -458,11 +470,19 @@ fn store_picture(uri: &str) -> Option<(slint::Image, bool)> {
 
 /// The plugins of the Add effect page, from the latest LV2 scan
 pub(crate) fn set_available_plugins(app: &App, state: &AppState) {
+    let plate_size = plates::block_size(app, 1.0);
     let plugins: Vec<PluginItem> = views::plugin_views(state)
         .into_iter()
         .map(|p| {
             let picture = store_picture(&p.uri).map(|(p, _)| p);
+            let category = state.plugin_category(&p.uri);
             PluginItem {
+                faceplate: plates::block_face(
+                    &p.uri,
+                    p.faceplate.as_ref(),
+                    category.as_ref(),
+                    plate_size,
+                ),
                 has_picture: picture.is_some(),
                 picture: picture.unwrap_or_default(),
                 uri: p.uri.into(),
@@ -509,18 +529,11 @@ fn refresh_editor(app: &App, state: &AppState, chain: &EffectChainState) {
         }
         return;
     };
-    // Places in the knob strip, for those in it
-    let mut strip_count = 0;
     let parameters: Vec<ParameterInfo> = view
         .parameters
         .into_iter()
         .map(|p| ParameterInfo {
-            strip_pos: if p.in_strip {
-                strip_count += 1;
-                strip_count - 1
-            } else {
-                -1
-            },
+            strip_pos: p.strip_pos.map_or(-1, |pos| pos as i32),
             index: p.index as i32,
             name: p.name.into(),
             min: p.min,
@@ -546,10 +559,16 @@ fn refresh_editor(app: &App, state: &AppState, chain: &EffectChainState) {
     app.set_selected_color(color.into());
     app.set_selected_plugin_name(view.name.into());
     app.set_selected_plugin_category(view.category.into());
+    plates::refresh_editor(
+        app,
+        &view.uri,
+        view.faceplate.as_ref(),
+        state.plugin_category(&view.uri).as_ref(),
+    );
     app.set_selected_plugin_bypassed(view.bypassed);
     app.set_selected_bypass_midi(midi_label(chain, view.instance_id, MidiTarget::Bypass));
+    app.set_selected_strip_count(parameters.iter().filter(|p| p.strip_pos >= 0).count() as i32);
     app.set_selected_parameters(model(parameters));
-    app.set_selected_strip_count(strip_count);
     plugin_view::refresh(app, state);
     app.set_selected_uses_file(view.uses_file);
     let pack = match chain.find(view.instance_id) {
@@ -1909,6 +1928,7 @@ fn main() -> Result<()> {
     #[cfg(feature = "tone3000")]
     tone3000_ui::setup(&app, &state);
     wifi_ui::setup(&app);
+    plates::setup(&app);
     menu_ui::setup(&app);
     #[cfg(feature = "update")]
     update_ui::setup(&app);

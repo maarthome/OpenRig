@@ -1,6 +1,6 @@
-import { Theme } from "../theme.slint";
+import { PlotColors, Theme } from "../theme.slint";
 import { DynView, DynLive } from "../types.slint";
-import { Caption, DbLabels, Handle, InOut, Plot, PlotEvents, PlotPath } from "plot.slint";
+import { BlockHandle, BlockPlot, Caption, DbLabels, InOut, Plot, PlotPath } from "plot.slint";
 
 // Level curve of a compressor, limiter or gate, with what it does right now:
 // the sound on the curve, the last seconds in and out, and the gain
@@ -9,24 +9,28 @@ import { Caption, DbLabels, Handle, InOut, Plot, PlotEvents, PlotPath } from "pl
 export component DynamicsGraph inherits Rectangle {
     in property <DynView> dyn;
     in property <DynLive> live;
-    in property <color> accent: Theme.accent;
+    in property <PlotColors> colors: Theme.plot;
+    in property <color> accent: root.colors.accent;
     in property <bool> bypassed: false;
 
-    private property <color> line: root.dyn.enabled && !root.bypassed ? root.accent : Theme.text-muted;
+    private property <color> line: root.dyn.enabled && !root.bypassed ? root.accent : root.colors.muted;
     private property <length> side: root.height - 34px;
 
     border-radius: Theme.radius-lg;
-    background: Theme.surface;
+    background: root.colors.surface;
     border-width: 1px;
-    border-color: Theme.border;
+    border-color: root.colors.grid;
 
     // Shared by the curve and the history
     DbLabels {
+        colors: root.colors;
         top: curve.y;
         side: root.side;
     }
 
     curve := Plot {
+
+        colors: root.colors;
         x: 40px;
         y: 12px;
         width: root.side;
@@ -36,12 +40,12 @@ export component DynamicsGraph inherits Rectangle {
             x: f * curve.width;
             width: 1px;
             height: curve.height;
-            background: Theme.border;
+            background: root.colors.grid;
         }
         // Unity: what comes in goes out
         PlotPath {
             commands: "M 0 1000 L 1000 0";
-            stroke: Theme.border-strong;
+            stroke: root.colors.grid-strong;
             stroke-width: 1px;
         }
         PlotPath {
@@ -53,33 +57,23 @@ export component DynamicsGraph inherits Rectangle {
 
     // Ratio and threshold handles, over the curve (the threshold on top: at
     // 0 dB both sit in the corner, where the ratio changes nothing)
-    Handle {
+    BlockHandle {
+        colors: root.colors;
         handle: root.dyn.ratio;
         accent: root.line;
         plot-x: curve.x;
         plot-y: curve.y;
         plot-width: curve.width;
         plot-height: curve.height;
-        drag(x, y) => {
-            PlotEvents.drag(self.handle.name, x, y);
-        }
-        released => {
-            PlotEvents.released();
-        }
     }
-    Handle {
+    BlockHandle {
+        colors: root.colors;
         handle: root.dyn.threshold;
         accent: root.line;
         plot-x: curve.x;
         plot-y: curve.y;
         plot-width: curve.width;
         plot-height: curve.height;
-        drag(x, y) => {
-            PlotEvents.drag(self.handle.name, x, y);
-        }
-        released => {
-            PlotEvents.released();
-        }
     }
     // The sound, on the curve (over the handles, which it passes through)
     if root.live.active: Rectangle {
@@ -88,23 +82,22 @@ export component DynamicsGraph inherits Rectangle {
         width: 12px;
         height: 12px;
         border-radius: 6px;
-        background: Theme.text-primary;
+        background: root.colors.strong;
         border-width: 2px;
         border-color: root.line;
     }
 
     // The last seconds: in (grey), out (block colour), reduction from the top
-    history := Plot {
+    history := BlockPlot {
+        colors: root.colors;
         x: curve.x + curve.width + 12px;
         y: curve.y;
         width: root.width - self.x - 64px;
         height: curve.height;
-        // The wide plot of the view
-        sized(w, h) => {
-            PlotEvents.resized(w, h);
-        }
 
         InOut {
+
+            colors: root.colors;
             input: root.live.history-in;
             output: root.live.history-out;
             accent: root.line;
@@ -115,6 +108,7 @@ export component DynamicsGraph inherits Rectangle {
             stroke-width: 2px;
         }
         Caption {
+            colors: root.colors;
             x: 6px;
             y: history.height - self.height - 6px;
             text: root.dyn.kind + (root.dyn.summary == "" ? "" : "  ·  " + root.dyn.summary);
@@ -131,7 +125,7 @@ export component DynamicsGraph inherits Rectangle {
             y: 0;
             width: parent.width;
             text: "GR";
-            color: Theme.text-muted;
+            color: root.colors.muted;
             font-size: Theme.font-caption;
             horizontal-alignment: center;
         }
@@ -140,7 +134,7 @@ export component DynamicsGraph inherits Rectangle {
             y: 16px;
             width: 14px;
             height: parent.height - 40px;
-            background: Theme.display;
+            background: root.colors.display;
             border-radius: Theme.radius-sm;
             Rectangle {
                 y: 0;
@@ -155,7 +149,7 @@ export component DynamicsGraph inherits Rectangle {
             y: parent.height - 18px;
             width: parent.width;
             text: root.live.reduction-text;
-            color: root.live.reduction < -0.5 ? Theme.text-primary : Theme.text-muted;
+            color: root.live.reduction < -0.5 ? root.colors.strong : root.colors.muted;
             font-size: Theme.font-caption;
             font-weight: Theme.weight-bold;
             horizontal-alignment: center;

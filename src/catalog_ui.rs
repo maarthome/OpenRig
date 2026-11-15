@@ -17,9 +17,9 @@ use pedalboard::state::AppState;
 use pedalboard::store::index::{Index, Package, Plugin};
 use pedalboard::store::install::Installed;
 use pedalboard::store::{self, Status, Store};
-use pedalboard::ui::slint_bridge::block_color;
+use pedalboard::ui::slint_bridge::{block_color, rack_color};
 
-use crate::{model, spawn, ui, App, CatalogFamily, CatalogItem};
+use crate::{model, plates, rgb, spawn, ui, App, CatalogFamily, CatalogItem};
 
 /// Families in the order of the Add effect page
 const FAMILIES: [&str; 8] = [
@@ -103,8 +103,7 @@ fn colour(plugin: &Plugin) -> Color {
         (_, "Reverb") => "teal",
         _ => "silver",
     };
-    let rgb = block_color(name).unwrap_or(0x696c72);
-    Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+    rgb(block_color(name).unwrap_or(0x696c72))
 }
 
 /// Whether the entry matches every word of the search
@@ -131,8 +130,19 @@ impl Page {
         store::status(package, plugin, &self.installed, loaded)
     }
 
-    fn item(&self, state: &AppState, package: &Package, plugin: &Plugin) -> CatalogItem {
+    /// The entry of `plugin`; an installed OpenRig FX plugin shows its face,
+    /// its plate drawn at `plate_size`
+    fn item(
+        &self,
+        state: &AppState,
+        package: &Package,
+        plugin: &Plugin,
+        plate_size: Option<(u32, u32)>,
+    ) -> CatalogItem {
         let status = self.status(state, package, plugin);
+        let scanner = state.lv2_host.scanner();
+        let info = scanner.find_by_uri(&plugin.uri);
+        let face = info.and_then(|i| i.faceplate.as_ref());
         let (name, progress) = match self.jobs.get(&plugin.id) {
             Some(Job::Installing(p)) => ("installing", *p),
             Some(Job::Removing) => ("removing", 0.0),
@@ -176,7 +186,11 @@ impl Page {
             note: note.into(),
             progress,
             kind: plugin.kind.as_str().into(),
-            color: colour(plugin),
+            // Once installed, as its block in the rack
+            color: match info {
+                Some(info) => rgb(rack_color(None, &info.uri, Some(info)).1),
+                None => colour(plugin),
+            },
             picture: picture.cloned().unwrap_or_default(),
             has_picture: picture.is_some(),
             picture_credit: plugin
@@ -186,6 +200,7 @@ impl Page {
                 .map(|p| format!("{}, {}", p.credit, p.license))
                 .unwrap_or_default()
                 .into(),
+            faceplate: plates::block_face(&plugin.uri, face, info.map(|i| &i.category), plate_size),
         }
     }
 
@@ -205,6 +220,8 @@ impl Page {
     }
 
     fn show(&self, app: &App, state: &AppState) {
+        // Plates are drawn up to twice their rack size on the entry's page
+        let plate_size = plates::block_size(app, 2.0);
         let entries: Vec<(&Package, &Plugin)> =
             self.index.iter().flat_map(|i| i.entries()).collect();
         let found: Vec<&(&Package, &Plugin)> = entries
@@ -230,7 +247,7 @@ impl Page {
         let items: Vec<CatalogItem> = found
             .iter()
             .filter(|(_, p)| self.family == "All" || p.family == self.family)
-            .map(|(package, plugin)| self.item(state, package, plugin))
+            .map(|(package, plugin)| self.item(state, package, plugin, plate_size))
             .collect();
         app.set_catalog_items(model(items));
         app.set_catalog_families(model(families));

@@ -21,11 +21,61 @@ What OpenRig does, in more technical detail than the
   for the block in the rack when it is the gear's face. See
   [STORE.md](STORE.md).
 - **Plugin views**: above an LV2 block's controls, the editor draws an EQ's
-  response, a compressor's level curve or a delay's echoes, with points to
-  drag, over the sound measured in and out of that block (spectrum, levels,
-  waves). They are inferred from the plugin's LV2 class and the names and
+  response, a compressor's level curve or a delay's echoes (each with its
+  fading tail, over the beats of the tempo), with points to drag, over the sound measured in and out of that block (spectrum, levels).
+  A drive shows its tone: its small-signal frequency response, measured
+  on an instance of its own at the current settings (a quiet click after a
+  short silence, on the chain builder thread) and drawn again when a
+  control moves. They are inferred from the plugin's LV2 class and the names and
   units of its ports, never configured per plugin; a plugin read without
   confidence keeps its knobs alone.
+- **OpenRig FX faceplates**: plugins whose URI starts with
+  `https://openrig.eu/plugins/` (the [OpenRig FX](https://github.com/Siryu6/openrig-fx)
+  suite) may describe their face in Turtle, in the `https://openrig.eu/ns/view#`
+  namespace: `openrig:family` (`Basic` or `Signature`), `faceColor`
+  (`"#RRGGBB"`), `knobStyle` (`Plain`, `Skirted`, `Chickenhead`, `Domed`),
+  `finish` (`Painted`, `Brushed`), `wear` (0 to 1), `plateName` (12
+  characters at most), `tagline` (48 at most), `view` (`EqView`,
+  `DynamicsView` with `dynamics` `Compressor`, `Limiter` or `Gate`,
+  `EchoTimelineView`; a view the app does not draw leaves it to inference)
+  and, per control, `order` (the face order: controls the user has not
+  arranged follow it, then the port order), `role` (what the control means
+  to the view: `threshold`, `ratio`, `knee`, `makeup`, `inputGain`, `range`,
+  `gainReduction`, `delayTime`, `feedback`, `mix`, `wetLevel`,
+  `delayTempoDivision`, `pingPong`) and `primary` (its rank in the rack's
+  knob strip, before the other controls, unless the user arranged them).
+  A stated view or role wins over what the view infers from names; the
+  rest is inferred as for any plugin. With ping-pong on, a delay's echoes
+  alternate between a left lane (top) and a right lane (bottom); a toggle
+  named "Ping Pong" is read the same way on any delay. Any other plugin, or one with no family, keeps the generic
+  look; these terms are ignored outside that prefix, and a signature plugin
+  without a valid colour is drawn as a basic one. A basic plugin has the
+  OpenRig look: an amber left edge and an "OR FX" mark on its rack block with
+  a glyph of its category, the OpenRig mark in the editor header (and
+  "OpenRig FX" before the family, latency, parameters and CPU; on a screen
+  under 1000 px wide, only the family, latency and CPU), its view always
+  shown, and modes of three choices or fewer always as a switch: keys in a
+  row, stacked when the control is too narrow for them (on a signature
+  plate, a column of silk labels each with an LED). Choices come in the
+  order of their values on every plugin.
+  A signature plugin's controls and view sit on its plate in the editor:
+  a picture drawn once per plate and size by `Plate::render` (its colour lit
+  from above, grain, brushed streaks, scratches and rubbed edges from the
+  wear, seeded by the URI so a plate never changes) and kept in memory, four
+  screws, knobs in its knob style (a steel cap on a very dark plate), values
+  in amber readout windows, a view window that stays dark with amber
+  lines in both themes (the gear colours of `Theme.plot-gear`), its silk name, tagline and green "on" LED. The
+  web remote draws plates flat, in their colour only.
+  In the rack, a signature block is a mini pedal on its plate: two small
+  knobs, the green LED, its silk name and a footswitch (tap, hold and drag
+  as on any block; bypassed, it goes dark). Its default colour, on the rack,
+  the knob strip and in an exported rig (`color_hex`; `color` stays the
+  family's palette name), is its plate colour, lifted when too dark to show
+  on the stage.
+  The Add effect page and the store mark the suite's plugins with an
+  "OR FX" badge (by URI prefix, so before they are installed too) and show
+  an installed one's block as the rack draws it: the same `BlockShape` and
+  `BlockFace`, with the plate drawn at twice the rack size on a store page.
 - **Amp, Amp + Cab and Pedal blocks** (feature `nam`, default): built-in neural blocks
   running Neural Amp Modeler `.nam` captures (and RTNeural `.json` /
   `.aidax` models) through [NeuralAudio](https://github.com/mikeoliphant/NeuralAudio).
@@ -112,7 +162,7 @@ What OpenRig does, in more technical detail than the
   a stereo one.
 - **Touch rack**: blocks are drawn after their gear (flat amp head, combo,
   cabinet with speakers, pedal with footswitch, reverb pill; LV2 plugins keep
-  a plain card), coloured by family (amp red, cab orange, drive yellow,
+  a plain card, OpenRig FX plugins their faceplate), coloured by family (amp red, cab orange, drive yellow,
   reverb teal, delay green, modulation blue…) or with a colour picked in the
   block editor. The UI is styled like dark, minimal hardware: near-square
   corners, amber accent, key-like buttons with status LEDs, recessed displays,

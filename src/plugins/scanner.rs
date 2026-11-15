@@ -71,6 +71,19 @@ pub struct PortInfo {
     /// running bypassed and plays its own tail
     #[serde(default)]
     pub enabled: bool,
+    /// Place on an OpenRig FX faceplate (`openrig:order`, from 1): read
+    /// only for trusted plugins (see [`super::faceplate`])
+    #[serde(default)]
+    pub order: Option<u32>,
+    /// What the control means to the plugin's view (`openrig:role`, by its
+    /// local name: "threshold", "delayTime"…): read only for trusted
+    /// plugins, it wins over what the view infers from the name
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Rank in the rack's knob strip (`openrig:primary`, from 1): read only
+    /// for trusted plugins
+    #[serde(default)]
+    pub primary: Option<u32>,
 }
 
 impl PortInfo {
@@ -102,7 +115,7 @@ impl PortInfo {
 }
 
 /// Plugin metadata from LV2 discovery
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginInfo {
     pub uri: String,
     pub name: String,
@@ -121,6 +134,9 @@ pub struct PluginInfo {
     /// Presets shipped in the plugin's bundle (`pset:Preset`), by label
     #[serde(default)]
     pub presets: Vec<FactoryPreset>,
+    /// The OpenRig FX look (basic or signature); `None`: the generic look
+    #[serde(default)]
+    pub faceplate: Option<super::faceplate::Faceplate>,
 }
 
 /// A preset an LV2 bundle ships (`pset:Preset`), shown as a factory setting
@@ -281,7 +297,7 @@ impl PluginInfo {
 }
 
 /// Plugin categories (LV2 classes)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum PluginCategory {
     Dynamics,   // Compressor, Limiter, Gate
     Distortion, // Overdrive, Fuzz, Distortion
@@ -293,6 +309,7 @@ pub enum PluginCategory {
     Utility,    // Tuner, Analyzer, Mixer
     Generator,  // Oscillator, Noise
     Routing,    // Sends and returns (built in)
+    #[default]
     Unknown,
 }
 
@@ -810,6 +827,7 @@ fn demo_plugin(
         ports,
         file_params: Vec::new(),
         presets: Vec::new(),
+        faceplate: None,
     }
 }
 

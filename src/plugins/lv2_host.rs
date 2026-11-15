@@ -263,6 +263,7 @@ fn world_on(path: &str) -> lilv::World {
 
 #[cfg(feature = "lv2")]
 mod discovery {
+    use super::super::faceplate::{self, Terms};
     use super::super::lv2_features::SUPPORTED_FEATURES;
     use super::super::scanner::{
         FactoryPreset, FileParam, PluginCategory, PluginInfo, PortInfo, PortType,
@@ -275,6 +276,14 @@ mod discovery {
 
     fn number(node: &Node) -> Option<f32> {
         node.as_float().or_else(|| node.as_int().map(|i| i as f32))
+    }
+
+    /// A place from 1 (`openrig:order`, `openrig:primary`)
+    fn rank(node: Option<Node>) -> Option<u32> {
+        node.as_ref()
+            .and_then(number)
+            .filter(|o| *o >= 1.0 && o.fract() == 0.0)
+            .map(|o| o as u32)
     }
 
     /// Short symbol for the common lv2 units
@@ -408,6 +417,36 @@ mod discovery {
         presets
     }
 
+    /// The `openrig:` faceplate terms of a plugin, as written
+    fn faceplate_terms(world: &World, plugin: &lilv::plugin::Plugin) -> Terms {
+        let first = |term: &str| {
+            plugin
+                .value(&world.new_uri(&format!("{}{term}", faceplate::NS)))
+                .iter()
+                .next()
+        };
+        // A resource of the vocabulary, by its local name
+        let resource = |term: &str| {
+            first(term).and_then(|n| {
+                n.as_uri()
+                    .and_then(|u| u.strip_prefix(faceplate::NS))
+                    .map(str::to_string)
+            })
+        };
+        let text = |term: &str| first(term).and_then(|n| n.as_str().map(str::to_string));
+        Terms {
+            family: resource("family"),
+            face_color: text("faceColor"),
+            knob_style: resource("knobStyle"),
+            finish: resource("finish"),
+            wear: first("wear").as_ref().and_then(number),
+            plate_name: text("plateName"),
+            tagline: text("tagline"),
+            view: resource("view"),
+            dynamics: resource("dynamics"),
+        }
+    }
+
     pub fn scan(world: &World) -> Vec<PluginInfo> {
         let uri = |s: &str| world.new_uri(s);
         let audio = uri(&format!("{LV2}AudioPort"));
@@ -429,6 +468,9 @@ mod discovery {
         let midi_event = uri(crate::plugins::atom::MIDI_EVENT);
         let position = uri(crate::plugins::atom::TIME_POSITION);
         let patch_message = uri(crate::plugins::atom::PATCH_MESSAGE);
+        let face_order = uri(&format!("{}order", faceplate::NS));
+        let face_role = uri(&format!("{}role", faceplate::NS));
+        let face_primary = uri(&format!("{}primary", faceplate::NS));
 
         let mut found = Vec::new();
         'plugins: for plugin in world.plugins().iter() {
@@ -451,6 +493,8 @@ mod discovery {
                 }
             }
 
+            // Faceplate terms count only on OpenRig FX plugins
+            let trusted = faceplate::trusted(&plugin_uri);
             let mut ports = Vec::new();
             for port in plugin.iter_ports() {
                 let is_input = port.is_a(&input);
@@ -495,7 +539,8 @@ mod discovery {
                 );
                 let (min, max) = (a.min(b), a.max(b));
                 let default = finite(&range.default).unwrap_or(min).min(max).max(min);
-                let scale_points = port
+                // By value: RDF has no order, lilv gives them as stored
+                let mut scale_points: Vec<(String, f32)> = port
                     .scale_points()
                     .iter()
                     .filter_map(|sp| {
@@ -503,6 +548,7 @@ mod discovery {
                         Some((sp.label().as_str()?.to_string(), value))
                     })
                     .collect();
+                scale_points.sort_by(|a, b| a.1.total_cmp(&b.1));
 
                 let unit_name = port.get(&unit).and_then(|u| unit_symbol(world, &u));
                 ports.push(PortInfo {
@@ -537,6 +583,16 @@ mod discovery {
                             || port.get(&designation).is_some_and(|d| d == latency)),
                     enabled: port_type == PortType::ControlInput
                         && port.get(&designation).is_some_and(|d| d == enabled),
+                    order: (trusted && port_type == PortType::ControlInput)
+                        .then(|| rank(port.get(&face_order)))
+                        .flatten(),
+                    role: trusted
+                        .then(|| port.get(&face_role))
+                        .flatten()
+                        .and_then(|n| n.as_uri()?.strip_prefix(faceplate::NS).map(str::to_string)),
+                    primary: (trusted && port_type == PortType::ControlInput)
+                        .then(|| rank(port.get(&face_primary)))
+                        .flatten(),
                 });
             }
             ports.sort_by_key(|p| p.index);
@@ -560,12 +616,16 @@ mod discovery {
             let class = class_uri.rsplit('#').next().unwrap_or_default().to_string();
 
             let file_params = file_params(world, &plugin);
+            let name = plugin
+                .name()
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| plugin_uri.clone());
+            let faceplate = trusted
+                .then(|| faceplate_terms(world, &plugin).faceplate(&plugin_uri, &name))
+                .flatten();
             found.push(PluginInfo {
-                name: plugin
-                    .name()
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| plugin_uri.clone()),
+                name,
                 author: plugin
                     .author_name()
                     .and_then(|n| n.as_str().map(str::to_string))
@@ -579,6 +639,7 @@ mod discovery {
                 ports,
                 presets: presets(world, &plugin, &file_params),
                 file_params,
+                faceplate,
             });
         }
         found

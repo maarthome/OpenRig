@@ -1228,6 +1228,16 @@ impl AppState {
         audio.control.as_ref()?.error_rx.try_recv().ok()
     }
 
+    /// Measure a plugin's response on the chain builder (see
+    /// plugins::response); false when the audio engine is not running
+    pub fn measure_response(&self, probe: crate::plugins::response::Probe) -> bool {
+        let audio = self.audio.locked();
+        audio
+            .control
+            .as_ref()
+            .is_some_and(|control| control.probe_tx.send(probe).is_ok())
+    }
+
     /// Send the whole chain to be rebuilt. Called with the chain locked so
     /// that specs and commands are sent in the order they were made.
     fn send_spec(&self, chain: &EffectChainState) {
@@ -1360,6 +1370,14 @@ impl AppState {
             .scanner()
             .find_by_uri(uri)
             .map(|info| info.category.clone())
+    }
+
+    /// The OpenRig FX look of plugin `uri`; `None`: the generic look
+    pub fn plugin_faceplate(&self, uri: &str) -> Option<crate::plugins::faceplate::Faceplate> {
+        self.lv2_host
+            .scanner()
+            .find_by_uri(uri)
+            .and_then(|info| info.faceplate.clone())
     }
 
     // === Chain editing ===
@@ -2250,6 +2268,7 @@ mod tests {
             command_tx,
             midi_tx,
             error_rx,
+            probe_tx: crossbeam_channel::unbounded().0,
         });
         assert_eq!(spec_rx.try_recv().unwrap().generation, 1);
 
@@ -2860,6 +2879,7 @@ mod tests {
             ports,
             file_params: Vec::new(),
             presets: Vec::new(),
+            faceplate: None,
         }
     }
 

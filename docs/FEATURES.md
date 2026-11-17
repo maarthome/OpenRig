@@ -9,8 +9,9 @@ What OpenRig does, in more technical detail than the
   map / unmap, options, bounded-block-length, isLive and the worker
   (`work:schedule`: slow jobs such as loading a model run on a thread of the
   plugin's own) are provided; plugins that need anything else are skipped,
-  with a warning naming the missing feature in the log. Atom inputs get the tempo
-  (`time:Position`) and MIDI. Without any installed plugin, a demo
+  with a warning naming the missing feature in the log. Atom inputs get the
+  transport (`time:Position`: a running bar and beat position at the tempo,
+  in 4/4, at every block) and MIDI. Without any installed plugin, a demo
   catalogue (passthrough) keeps the UI usable for development.
 - **Plugin store** (feature `store`): installs free LV2 plugins from a
   signed index (minisign, anti-rollback serial, expiry), with the archive
@@ -35,9 +36,11 @@ What OpenRig does, in more technical detail than the
   namespace: `openrig:family` (`Basic` or `Signature`), `faceColor`
   (`"#RRGGBB"`), `knobStyle` (`Plain`, `Skirted`, `Chickenhead`, `Domed`),
   `finish` (`Painted`, `Brushed`), `wear` (0 to 1), `plateName` (12
-  characters at most), `tagline` (48 at most), `view` (`EqView`,
+  characters at most), `plateStyle` (`Silkscreen`, the default, or
+  `Glitch`), `tagline` (48 at most), `view` (`EqView`,
   `DynamicsView` with `dynamics` `Compressor`, `Limiter` or `Gate`,
-  `EchoTimelineView`; a view the app does not draw leaves it to inference)
+  `EchoTimelineView`, `StepGridView`; a view the app does not draw leaves
+  it to inference)
   and, per control, `order` (the face order: controls the user has not
   arranged follow it, then the port order), `role` (what the control means
   to the view: `threshold`, `ratio`, `knee`, `makeup`, `inputGain`, `range`,
@@ -47,7 +50,17 @@ What OpenRig does, in more technical detail than the
   A stated view or role wins over what the view infers from names; the
   rest is inferred as for any plugin. With ping-pong on, a delay's echoes
   alternate between a left lane (top) and a right lane (bottom); a toggle
-  named "Ping Pong" is read the same way on any delay. Any other plugin, or one with no family, keeps the generic
+  named "Ping Pong" is read the same way on any delay. A `StepGridView`
+  (a stutter, slicer or rhythmic gate) is drawn only from the plugin's
+  `openrig:stream` atom output of content `StepGrid` (3 rows: level,
+  source, speed), never from its controls: one bar with a line on each
+  beat, the live input in grey, the slice captured outlined in amber and
+  its repeats filled, the speed as a line where it is not 1, an arrow
+  where it plays backward, and the playhead. The audio thread copies the
+  last frame of the selected block only while its editor is open (a
+  seqlock in `BlockTap`, no allocation); the UI reads it every 40 ms,
+  draws the cells again only when they change, merges cells narrower than
+  4 px, and moves the playhead by whole pixels. Any other plugin, or one with no family, keeps the generic
   look; these terms are ignored outside that prefix, and a signature plugin
   without a valid colour is drawn as a basic one. A basic plugin has the
   OpenRig look: an amber left edge and an "OR FX" mark on its rack block with
@@ -64,8 +77,20 @@ What OpenRig does, in more technical detail than the
   wear, seeded by the URI so a plate never changes) and kept in memory, four
   screws, knobs in its knob style (a steel cap on a very dark plate), values
   in amber readout windows, a view window that stays dark with amber
-  lines in both themes (the gear colours of `Theme.plot-gear`), its silk name, tagline and green "on" LED. The
-  web remote draws plates flat, in their colour only.
+  lines in both themes (the gear colours of `Theme.plot-gear`), its silk name, tagline and green "on" LED. A
+  `Glitch` plate prints its name cut by two thin bands, as a corrupted
+  picture: from 20 to 30 % of the cap height above the baseline moved
+  right by 8 % of it in amber, from 62 to 70 % moved left by 4 %. The
+  offsets follow the font's own cap height and fall on whole pixels, so
+  the editor's plate and the rack's small pedal (whose name drops to
+  10 px when it does not fit) show the same cut; it never moves. The
+  web remote draws plates flat, in their colour only. A plate without a view
+  gives its height to its controls when they fit in two rows: taller cells
+  and knobs up to 104 px, the rows centred on the plate.
+  The parameter grid shows whole rows only: as many as fit at 110 px or
+  more share its height, the others go to pages (up and down keys and a
+  page count, silk-screened on a plate). On tall screens a view leaves room
+  for two rows. A plate's page keys stay dark in both themes.
   In the rack, a signature block is a mini pedal on its plate: two small
   knobs, the green LED, its silk name and a footswitch (tap, hold and drag
   as on any block; bypassed, it goes dark). Its default colour, on the rack,
@@ -163,7 +188,7 @@ What OpenRig does, in more technical detail than the
 - **Touch rack**: blocks are drawn after their gear (flat amp head, combo,
   cabinet with speakers, pedal with footswitch, reverb pill; LV2 plugins keep
   a plain card, OpenRig FX plugins their faceplate), coloured by family (amp red, cab orange, drive yellow,
-  reverb teal, delay green, modulation blue…) or with a colour picked in the
+  reverb teal, delay green, modulation blue, pitch lime…) or with a colour picked in the
   block editor. The UI is styled like dark, minimal hardware: near-square
   corners, amber accent, key-like buttons with status LEDs, recessed displays,
   input / output LED meters with clip LEDs on the rack, knobs tinted with the block's colour, LED
@@ -214,9 +239,12 @@ What OpenRig does, in more technical detail than the
   the community site, with the pedalboard linked to an account by a code.
   See [RIGS.md](RIGS.md).
 - **Live page**: 8 switch tiles in Stomp (block on/off, assignable),
-  Scenes or Setlist mode, tempo display with TAP. The last footswitch taps
+  Scenes or Setlist mode, tempo display with TAP. A stomp switch can also
+  play a switch of its plugin (Hold, Freeze…), latching or momentary (on
+  while held, from a footswitch, a tile, a key or MIDI CC 49–56). The last footswitch taps
   the tempo and, held, opens the tuner. The tempo drives the BPM ports of
-  LV2 plugins.
+  LV2 plugins and the bar position of the plugins that follow the
+  transport: a tap lands on a beat, a MIDI Start on the first beat.
 - **Tails (spillover)**: delays and reverbs keep ringing when bypassed or
   when the scene changes. LV2 plugins with an `lv2:enabled` port keep
   running bypassed with that port at 0, and play their own tail.

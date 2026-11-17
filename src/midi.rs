@@ -12,7 +12,7 @@
 //! | Program Change n | Preset n of the setlist (slot n), or of the preset list when no setlist is loaded |
 //! | CC 0 (Bank Select MSB) | Group of 128 presets in the preset list: PC n then loads preset 128 × group + n |
 //! | CC 32 (Bank Select LSB) | 0: leave the setlist (PC addresses the preset list); n: load setlist n |
-//! | CC 49–53, 54–56 | Footswitches 1–5, 6–8 (what they do depends on the Live mode) |
+//! | CC 49–53, 54–56 | Footswitches 1–5, 6–8 (what they do depends on the Live mode; a momentary stomp switch is down at 64–127, up at 0–63) |
 //! | CC 60 | Looper: 0–63 overdub, 64–127 record |
 //! | CC 61 | Looper: 0–63 stop, 64–127 play |
 //! | CC 63 | Looper: undo (64–127) |
@@ -23,6 +23,7 @@
 //! | CC 71 | Footswitch mode: 0 Stomp, 2 Setlist, 3 Scenes, 4 next, 5 previous |
 //! | CC 72 | Preset: 0–63 previous, 64–127 next |
 //! | MIDI clock | Tempo (when enabled) |
+//! | MIDI Start | The bar starts again on its first beat (when the clock is followed) |
 //!
 //! Any other CC (CC 1–3 being the expression pedals by convention) can be
 //! learned by a block parameter or bypass, and is saved with the preset.
@@ -179,9 +180,13 @@ pub enum MidiAction {
     BankMsb(u8),
     /// CC 32: 0 = the preset list, n = setlist n
     Bank(u8),
-    Footswitch(usize),
+    /// Footswitch n, and whether the value is high (64–127): a momentary
+    /// stomp switch is held down while high, any value presses the others
+    Footswitch(usize, bool),
     Looper(LooperAction),
     Tap,
+    /// MIDI Start: the transport goes back to the first beat of a bar
+    Start,
     Tuner,
     Scene(usize),
     SceneStep(Step),
@@ -243,6 +248,7 @@ pub fn action(message: MidiMessage, settings: &MidiSettings) -> Option<MidiActio
         MidiMessage::Program { channel, program } if on_channel(channel) => {
             Some(MidiAction::Program(program))
         }
+        MidiMessage::Start if settings.clock => Some(MidiAction::Start),
         MidiMessage::Control {
             channel,
             controller,
@@ -251,7 +257,8 @@ pub fn action(message: MidiMessage, settings: &MidiSettings) -> Option<MidiActio
             CC_BANK_MSB => Some(MidiAction::BankMsb(value)),
             CC_BANK => Some(MidiAction::Bank(value)),
             c if CC_FOOTSWITCH.contains(&c) => {
-                Some(MidiAction::Footswitch((c - CC_FOOTSWITCH.start()) as usize))
+                let slot = (c - CC_FOOTSWITCH.start()) as usize;
+                Some(MidiAction::Footswitch(slot, high(value)))
             }
             CC_LOOPER_RECORD => Some(MidiAction::Looper(if high(value) {
                 LooperAction::Record
@@ -455,6 +462,16 @@ mod tests {
     }
 
     #[test]
+    fn midi_start_restarts_the_bar_when_the_clock_is_followed() {
+        let mut s = MidiSettings::default();
+        assert_eq!(action(MidiMessage::Start, &s), Some(MidiAction::Start));
+        assert_eq!(action(MidiMessage::Continue, &s), None);
+        assert_eq!(action(MidiMessage::Stop, &s), None);
+        s.clock = false;
+        assert_eq!(action(MidiMessage::Start, &s), None);
+    }
+
+    #[test]
     fn follows_the_helix_map() {
         let s = MidiSettings::default();
         let act = |m| action(m, &s);
@@ -462,8 +479,8 @@ mod tests {
         assert_eq!(act(cc(69, 8)), Some(MidiAction::SceneStep(Step::Next)));
         assert_eq!(act(cc(64, 127)), Some(MidiAction::Tap));
         assert_eq!(act(cc(64, 0)), None);
-        assert_eq!(act(cc(49, 127)), Some(MidiAction::Footswitch(0)));
-        assert_eq!(act(cc(56, 0)), Some(MidiAction::Footswitch(7)));
+        assert_eq!(act(cc(49, 127)), Some(MidiAction::Footswitch(0, true)));
+        assert_eq!(act(cc(56, 0)), Some(MidiAction::Footswitch(7, false)));
         assert_eq!(
             act(cc(60, 0)),
             Some(MidiAction::Looper(LooperAction::Overdub))

@@ -8,6 +8,7 @@ use super::dsp::Cuts;
 use super::dsp::{NoiseGate, ToneStack};
 use super::scanner::{PluginCategory, PluginInfo, PortType, DEMO_LOOKAHEAD_URI, IR_SPACE_URI};
 use crate::audio::latency::{self, DelayLine};
+use crate::audio::transport::Position;
 use crate::midi::RawMidi;
 
 // Control port indices of the built-in blocks (ports 0 and 1 are audio).
@@ -57,6 +58,8 @@ struct AtomPort {
     time: bool,
     #[cfg_attr(not(feature = "lv2"), allow(dead_code))]
     patch: bool,
+    /// Output sending frames for a view (`openrig:stream`)
+    stream: bool,
 }
 
 enum Backend {
@@ -184,8 +187,9 @@ pub struct PluginInstance {
     atoms: Vec<AtomPort>,
     urids: AtomUrids,
     atom_chunk_urid: u32,
-    /// Tempo to send as a transport position at the next run
-    tempo: Option<f32>,
+    /// Where the music is at the start of the next run, sent to plugins
+    /// taking the transport (time:Position)
+    position: Option<Position>,
     /// MIDI messages for the next run
     midi: [RawMidi; MIDI_QUEUE],
     midi_len: usize,
@@ -268,7 +272,7 @@ impl PluginInstance {
             atoms: Vec::new(),
             urids: AtomUrids::default(),
             atom_chunk_urid: 0,
-            tempo: None,
+            position: None,
             midi: [RawMidi::default(); MIDI_QUEUE],
             midi_len: 0,
             controls,
@@ -395,6 +399,7 @@ impl PluginInstance {
                         midi: port.midi,
                         time: port.time,
                         patch: port.patch,
+                        stream: port.stream.is_some(),
                     });
                     pointer
                 }
@@ -537,17 +542,17 @@ impl PluginInstance {
         Ok(this)
     }
 
-    /// Prepare atom buffers before `run`: input sequences with the pending
-    /// transport and MIDI events (once), and output buffers advertising
-    /// their capacity as required by the atom spec.
+    /// Prepare atom buffers before `run`: input sequences with the
+    /// transport position and the pending MIDI events (once), and output
+    /// buffers advertising their capacity as required by the atom spec.
     fn reset_atoms(&mut self) {
         let midi = &self.midi[..self.midi_len];
         for port in &mut self.atoms {
             if port.input {
                 let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut port.buffer);
-                let tempo = self.tempo.filter(|_| port.time);
+                let position = self.position.as_ref().filter(|_| port.time);
                 let midi = if port.midi { midi } else { &[] };
-                atom::write_input(bytes, &self.urids, tempo, midi);
+                atom::write_input(bytes, &self.urids, position, midi);
             } else {
                 // LV2_Atom header: { size, type }
                 let header: &mut [u32] = bytemuck::cast_slice_mut(&mut port.buffer);
@@ -557,7 +562,6 @@ impl PluginInstance {
                 }
             }
         }
-        self.tempo = None;
         self.midi_len = 0;
     }
 
@@ -638,12 +642,10 @@ impl PluginInstance {
         let _ = (files, timeout);
     }
 
-    /// Send the tempo as a transport position at the next run (plugins
-    /// taking time:Position)
-    pub fn set_tempo(&mut self, bpm: f32) {
-        if self.atoms.iter().any(|p| p.time) {
-            self.tempo = Some(bpm);
-        }
+    /// Where the music is at the start of the next block given to
+    /// `process` (none: no transport sent). Real-time safe.
+    pub fn set_position(&mut self, position: Option<Position>) {
+        self.position = position;
     }
 
     /// Queue a MIDI message for the next run (plugins with a MIDI input);
@@ -850,6 +852,7 @@ impl PluginInstance {
             } else {
                 self.process_chunk(&mut left[start..end], right, stereo_in);
             }
+            self.position = self.position.map(|p| p.after(end - start));
             start = end;
         }
     }
@@ -1012,6 +1015,13 @@ impl PluginInstance {
     /// Value of every control port, by port index (outputs too)
     pub fn controls(&self) -> &[f32] {
         &self.controls
+    }
+
+    /// The last frame the plugin sent on its stream output
+    /// (`openrig:stream`) in its last run, if it sent one (real-time safe)
+    pub fn stream_frame(&self) -> Option<atom::Frame<'_>> {
+        let port = self.atoms.iter().find(|p| !p.input && p.stream)?;
+        atom::last_frame(bytemuck::cast_slice(&port.buffer), &self.urids)
     }
 
     /// Current value of a parameter

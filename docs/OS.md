@@ -178,6 +178,23 @@ root's `authorized_keys` (`/data/ssh`), the SSH host keys, the update state
 (`/data/update`, `/data/rauc`), app updates (`/data/app`) and `/var/lib`. It is checked at every boot. When it cannot
 be mounted, the pedalboard runs on a RAM disk (logged): nothing is kept.
 
+The app runs as user `pedalboard`, uid and gid 1000. Users that own files
+on `/data` have fixed ids in `os/board/common/users.table`, so that the
+files keep their owner across updates:
+
+| User | uid and gid | Directory |
+|---|---|---|
+| `pedalboard` | 1000 | `/data/pedalboard` |
+| `chrony` | 1001 | `/data/var/lib/chrony` |
+
+Buildroot gives the other system users automatic ids from 100 to 999, which
+can change between images; the fixed ids are above that range. Images up to
+0.17.0 picked all ids at build time. At every boot, `S00storage` gives every
+file in these directories that its user does not own back to it: owners
+only, modes are kept, links are not followed. Nothing outside these
+directories is changed. A new user that keeps files on `/data` gets a line
+in `users.table` and in `S00storage`.
+
 ### USB drives
 
 A USB stick, card reader or USB disk is mounted when it is plugged in, for
@@ -302,7 +319,8 @@ log of jackd and the app. Attach its output to an issue.
 `/var/log` is in RAM: the logs start again at each boot.
 
 There is no password login. Files copied to `/data/pedalboard` must belong
-to the user: `chown -R pedalboard:pedalboard /data/pedalboard`.
+to the user: `chown -R pedalboard:pedalboard /data/pedalboard` (the next
+boot does it too).
 
 ## Troubleshooting
 

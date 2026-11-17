@@ -1,13 +1,17 @@
 //! Events written into the atom input ports of LV2 plugins before each run:
-//! the transport (`time:Position`, so tempo-synced plugins follow the
-//! pedalboard tempo) and MIDI messages, plus the `patch:Set` messages that
-//! give a plugin its files. Plain byte layout from the LV2 atom spec,
-//! written in place without allocating (audio thread).
+//! the transport (`time:Position` at every run, so tempo-synced plugins
+//! follow the pedalboard tempo and bar) and MIDI messages, plus the `patch:Set` messages that
+//! give a plugin its files; and the `openrig:Frame` objects a plugin sends
+//! on a stream output for its view, read after a run. Plain byte layout
+//! from the LV2 atom spec, written and read in place without allocating
+//! (audio thread).
 
+use crate::audio::transport::{Position, BEATS_PER_BAR, BEAT_UNIT};
 use crate::midi::RawMidi;
 
 pub const ATOM_OBJECT: &str = "http://lv2plug.in/ns/ext/atom#Object";
 pub const ATOM_FLOAT: &str = "http://lv2plug.in/ns/ext/atom#Float";
+pub const ATOM_DOUBLE: &str = "http://lv2plug.in/ns/ext/atom#Double";
 pub const ATOM_LONG: &str = "http://lv2plug.in/ns/ext/atom#Long";
 pub const ATOM_INT: &str = "http://lv2plug.in/ns/ext/atom#Int";
 pub const MIDI_EVENT: &str = "http://lv2plug.in/ns/ext/midi#MidiEvent";
@@ -18,12 +22,19 @@ const ATOM_URID: &str = "http://lv2plug.in/ns/ext/atom#URID";
 const PATCH_SET: &str = "http://lv2plug.in/ns/ext/patch#Set";
 const PATCH_PROPERTY: &str = "http://lv2plug.in/ns/ext/patch#property";
 const PATCH_VALUE: &str = "http://lv2plug.in/ns/ext/patch#value";
+const TIME_FRAME: &str = "http://lv2plug.in/ns/ext/time#frame";
+const TIME_BEAT: &str = "http://lv2plug.in/ns/ext/time#beat";
 const TIME_SPEED: &str = "http://lv2plug.in/ns/ext/time#speed";
 const TIME_BPM: &str = "http://lv2plug.in/ns/ext/time#beatsPerMinute";
 const TIME_BAR: &str = "http://lv2plug.in/ns/ext/time#bar";
 const TIME_BAR_BEAT: &str = "http://lv2plug.in/ns/ext/time#barBeat";
 const TIME_BEAT_UNIT: &str = "http://lv2plug.in/ns/ext/time#beatUnit";
 const TIME_BEATS_PER_BAR: &str = "http://lv2plug.in/ns/ext/time#beatsPerBar";
+const ATOM_VECTOR: &str = "http://lv2plug.in/ns/ext/atom#Vector";
+const STREAM_FRAME: &str = "https://openrig.eu/ns/view#Frame";
+const STREAM_CHANNELS: &str = "https://openrig.eu/ns/view#channels";
+const STREAM_POSITION: &str = "https://openrig.eu/ns/view#position";
+const STREAM_VALUES: &str = "https://openrig.eu/ns/view#values";
 
 /// URIDs used in the events, mapped once per plugin instance
 #[derive(Debug, Clone, Copy, Default)]
@@ -31,10 +42,13 @@ pub struct AtomUrids {
     pub sequence: u32,
     pub object: u32,
     pub float: u32,
+    pub double: u32,
     pub long: u32,
     pub int: u32,
     pub midi_event: u32,
     pub position: u32,
+    pub frame: u32,
+    pub beat: u32,
     pub speed: u32,
     pub bpm: u32,
     pub bar: u32,
@@ -46,6 +60,11 @@ pub struct AtomUrids {
     pub patch_set: u32,
     pub patch_property: u32,
     pub patch_value: u32,
+    pub vector: u32,
+    pub stream_frame: u32,
+    pub stream_channels: u32,
+    pub stream_position: u32,
+    pub stream_values: u32,
 }
 
 impl AtomUrids {
@@ -54,10 +73,13 @@ impl AtomUrids {
             sequence,
             object: map(ATOM_OBJECT),
             float: map(ATOM_FLOAT),
+            double: map(ATOM_DOUBLE),
             long: map(ATOM_LONG),
             int: map(ATOM_INT),
             midi_event: map(MIDI_EVENT),
             position: map(TIME_POSITION),
+            frame: map(TIME_FRAME),
+            beat: map(TIME_BEAT),
             speed: map(TIME_SPEED),
             bpm: map(TIME_BPM),
             bar: map(TIME_BAR),
@@ -69,6 +91,11 @@ impl AtomUrids {
             patch_set: map(PATCH_SET),
             patch_property: map(PATCH_PROPERTY),
             patch_value: map(PATCH_VALUE),
+            vector: map(ATOM_VECTOR),
+            stream_frame: map(STREAM_FRAME),
+            stream_channels: map(STREAM_CHANNELS),
+            stream_position: map(STREAM_POSITION),
+            stream_values: map(STREAM_VALUES),
         }
     }
 }
@@ -133,29 +160,43 @@ impl Writer<'_> {
 }
 
 /// Size of an event body holding a transport position (object body and its
-/// six properties, each padded to 24 bytes)
-const POSITION_BODY: usize = 8 + 6 * 24;
+/// eight properties, each padded to 24 bytes)
+const POSITION_BODY: usize = 8 + 8 * 24;
 
-/// Write an input sequence holding the transport position at `bpm` (when
-/// given) and `midi`, all at frame 0. The buffer must start 8-byte aligned.
-pub fn write_input(buf: &mut [u8], urids: &AtomUrids, bpm: Option<f32>, midi: &[RawMidi]) {
+/// Write an input sequence holding the transport `position` (when given)
+/// and `midi`, all at frame 0. The buffer must start 8-byte aligned.
+pub fn write_input(
+    buf: &mut [u8],
+    urids: &AtomUrids,
+    position: Option<&Position>,
+    midi: &[RawMidi],
+) {
     let mut w = Writer { buf, at: 0 };
     // Sequence header; its size is set once the events are known
     w.u32(0);
     w.u32(urids.sequence);
     w.u32(0); // unit: frames
     w.u32(0);
-    if let Some(bpm) = bpm.filter(|_| w.fits(16 + POSITION_BODY)) {
+    if let Some(p) = position.filter(|_| w.fits(16 + POSITION_BODY)) {
         w.event(POSITION_BODY as u32, urids.object);
         w.u32(0); // id
         w.u32(urids.position);
-        // The pedalboard is always "playing": synced LFOs and delays run
-        w.property(urids.speed, urids.float, &1.0f32.to_ne_bytes());
-        w.property(urids.bpm, urids.float, &bpm.to_ne_bytes());
-        w.property(urids.bar, urids.long, &0i64.to_ne_bytes());
-        w.property(urids.bar_beat, urids.float, &0.0f32.to_ne_bytes());
-        w.property(urids.beat_unit, urids.int, &4i32.to_ne_bytes());
-        w.property(urids.beats_per_bar, urids.float, &4.0f32.to_ne_bytes());
+        w.property(urids.frame, urids.long, &(p.frame as i64).to_ne_bytes());
+        w.property(urids.speed, urids.float, &p.speed().to_ne_bytes());
+        w.property(urids.bpm, urids.float, &p.bpm.to_ne_bytes());
+        w.property(urids.bar, urids.long, &p.bar().to_ne_bytes());
+        w.property(urids.bar_beat, urids.float, &p.bar_beat().to_ne_bytes());
+        w.property(urids.beat, urids.double, &p.beat.to_ne_bytes());
+        w.property(
+            urids.beat_unit,
+            urids.int,
+            &(BEAT_UNIT as i32).to_ne_bytes(),
+        );
+        w.property(
+            urids.beats_per_bar,
+            urids.float,
+            &(BEATS_PER_BAR as f32).to_ne_bytes(),
+        );
     }
     for message in midi {
         let bytes = message.as_slice();
@@ -207,6 +248,93 @@ pub fn write_patch_sets(buf: &mut [u8], urids: &AtomUrids, sets: &[(u32, &str)])
     written
 }
 
+/// A frame a plugin sent on a stream output (`openrig:Frame`): its rows,
+/// position and values, channel after channel, read in place
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Frame<'a> {
+    pub channels: u32,
+    pub position: f32,
+    /// The values as the plugin wrote them, 4 bytes each
+    values: &'a [u8],
+}
+
+impl Frame<'_> {
+    pub fn values(&self) -> impl Iterator<Item = f32> + '_ {
+        self.values
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_ne_bytes(*b))
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len() / 4
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.len() < 4
+    }
+}
+
+fn u32_in(buf: &[u8], at: usize) -> Option<u32> {
+    let bytes = buf.get(at..at.checked_add(4)?)?;
+    Some(u32::from_ne_bytes(bytes.try_into().ok()?))
+}
+
+/// The atom at `at` in `buf`: its type and body
+fn atom_in(buf: &[u8], at: usize) -> Option<(u32, &[u8])> {
+    let size = u32_in(buf, at)? as usize;
+    let kind = u32_in(buf, at + 4)?;
+    let start = at.checked_add(8)?;
+    Some((kind, buf.get(start..start.checked_add(size)?)?))
+}
+
+/// The last `openrig:Frame` of an output sequence the plugin wrote (`None`
+/// if it sent none in that run). Anything malformed is skipped; never
+/// reads past the buffer (real-time safe).
+pub fn last_frame<'a>(buf: &'a [u8], urids: &AtomUrids) -> Option<Frame<'a>> {
+    let (kind, body) = atom_in(buf, 0)?;
+    if kind != urids.sequence {
+        return None;
+    }
+    // Sequence body: unit and padding, then events (time, atom)
+    let mut at = 8;
+    let mut last = None;
+    while let Some((kind, event)) = atom_in(body, at + 8) {
+        if kind == urids.object && u32_in(event, 4) == Some(urids.stream_frame) {
+            last = Some(event);
+        }
+        at += 16 + event.len().next_multiple_of(8);
+    }
+    let object = last?;
+    // Object body: id and type, then properties (key, context, value atom)
+    let (mut channels, mut position, mut values) = (None, 0.0, None);
+    let mut at = 8;
+    while let Some(key) = u32_in(object, at) {
+        let Some((kind, value)) = atom_in(object, at + 8) else {
+            break;
+        };
+        let word = u32_in(value, 0);
+        if key == urids.stream_channels && kind == urids.int {
+            channels = word;
+        } else if key == urids.stream_position && kind == urids.float {
+            position = word.map_or(0.0, f32::from_bits);
+        } else if key == urids.stream_values
+            && kind == urids.vector
+            && word == Some(4)
+            && u32_in(value, 4) == Some(urids.float)
+        {
+            values = value.get(8..);
+        }
+        at += 16 + value.len().next_multiple_of(8);
+    }
+    Some(Frame {
+        channels: channels.filter(|c| (1..=i32::MAX as u32).contains(c))?,
+        position: if position.is_finite() { position } else { 0.0 },
+        values: values?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,10 +343,13 @@ mod tests {
         let names = [
             ATOM_OBJECT,
             ATOM_FLOAT,
+            ATOM_DOUBLE,
             ATOM_LONG,
             ATOM_INT,
             MIDI_EVENT,
             TIME_POSITION,
+            TIME_FRAME,
+            TIME_BEAT,
             TIME_SPEED,
             TIME_BPM,
             TIME_BAR,
@@ -230,6 +361,11 @@ mod tests {
             PATCH_SET,
             PATCH_PROPERTY,
             PATCH_VALUE,
+            ATOM_VECTOR,
+            STREAM_FRAME,
+            STREAM_CHANNELS,
+            STREAM_POSITION,
+            STREAM_VALUES,
         ];
         AtomUrids::new(1, |uri| {
             names.iter().position(|n| *n == uri).unwrap() as u32 + 2
@@ -257,19 +393,47 @@ mod tests {
             bytes: [0x90, 60, 100],
             len: 3,
         };
-        write_input(&mut buf, &u, Some(120.0), &[note]);
+        // Bar 2, beat 1.5 (5.5 beats from the start)
+        let position = Position {
+            frame: 132_000,
+            beat: 5.5,
+            bpm: 120.0,
+            sample_rate: 48_000.0,
+        };
+        write_input(&mut buf, &u, Some(&position), &[note]);
         // Position event: frame, body atom, object body
         assert_eq!(u32_at(&buf, 24), POSITION_BODY as u32);
         assert_eq!(u32_at(&buf, 28), u.object);
         assert_eq!(u32_at(&buf, 36), u.position);
-        // Second property is the tempo
-        let bpm = 40 + 24;
-        assert_eq!(u32_at(&buf, bpm), u.bpm);
-        assert_eq!(u32_at(&buf, bpm + 12), u.float);
+        // Properties in order: key at +0, value type at +12, value at +16
+        let property = |n: usize| 40 + n * 24;
+        let value = |n: usize| &buf[property(n) + 16..property(n) + 24];
+        let f32_of = |n: usize| f32::from_ne_bytes(value(n)[..4].try_into().unwrap());
+        let i64_of = |n: usize| i64::from_ne_bytes(value(n).try_into().unwrap());
+        let keys: Vec<(u32, u32)> = (0..8)
+            .map(|n| (u32_at(&buf, property(n)), u32_at(&buf, property(n) + 12)))
+            .collect();
         assert_eq!(
-            f32::from_ne_bytes(buf[bpm + 16..bpm + 20].try_into().unwrap()),
-            120.0
+            keys,
+            [
+                (u.frame, u.long),
+                (u.speed, u.float),
+                (u.bpm, u.float),
+                (u.bar, u.long),
+                (u.bar_beat, u.float),
+                (u.beat, u.double),
+                (u.beat_unit, u.int),
+                (u.beats_per_bar, u.float),
+            ]
         );
+        assert_eq!(i64_of(0), 132_000);
+        assert_eq!(f32_of(1), 1.0);
+        assert_eq!(f32_of(2), 120.0);
+        assert_eq!(i64_of(3), 1);
+        assert_eq!(f32_of(4), 1.5);
+        assert_eq!(f64::from_ne_bytes(value(5).try_into().unwrap()), 5.5);
+        assert_eq!(i32::from_ne_bytes(value(6)[..4].try_into().unwrap()), 4);
+        assert_eq!(f32_of(7), 4.0);
         // MIDI event right after, 8-byte aligned
         let midi = 16 + 16 + POSITION_BODY;
         assert_eq!(midi % 8, 0);
@@ -287,7 +451,13 @@ mod tests {
             bytes: [0x80, 60, 0],
             len: 3,
         };
-        write_input(&mut buf, &urids(), Some(90.0), &[note, note]);
+        let position = Position {
+            frame: 0,
+            beat: 0.0,
+            bpm: 90.0,
+            sample_rate: 48_000.0,
+        };
+        write_input(&mut buf, &urids(), Some(&position), &[note, note]);
         // No room for the position; one note fits
         assert_eq!(u32_at(&buf, 0), 8 + 24);
     }
@@ -324,5 +494,63 @@ mod tests {
             write_patch_sets(&mut buf, &urids(), &[(1, "a"), (2, &long)]),
             1
         );
+    }
+    /// An output sequence as a plugin writes it: a MIDI event, then one
+    /// `openrig:Frame` per (position, values), three rows each
+    fn stream(u: &AtomUrids, frames: &[(f32, &[f32])]) -> Vec<u64> {
+        let mut words = vec![0u64; 256];
+        let buf: &mut [u8] = bytemuck::cast_slice_mut(&mut words);
+        let mut w = Writer { buf, at: 0 };
+        w.u32(0);
+        w.u32(u.sequence);
+        w.u32(0);
+        w.u32(0);
+        w.event(3, u.midi_event);
+        w.bytes(&[0x90, 60, 100]);
+        w.pad();
+        for (position, values) in frames {
+            let vector = 8 + 4 * values.len();
+            let body = 8 + 2 * 24 + (16 + vector).next_multiple_of(8);
+            w.event(body as u32, u.object);
+            w.u32(0);
+            w.u32(u.stream_frame);
+            w.property(u.stream_channels, u.int, &3i32.to_ne_bytes());
+            w.property(u.stream_position, u.float, &position.to_ne_bytes());
+            w.u32(u.stream_values);
+            w.u32(0);
+            w.u32(vector as u32);
+            w.u32(u.vector);
+            w.u32(4);
+            w.u32(u.float);
+            for v in *values {
+                w.bytes(&v.to_ne_bytes());
+            }
+            w.pad();
+        }
+        w.finish();
+        words
+    }
+
+    #[test]
+    fn the_last_frame_of_a_stream_is_read() {
+        let u = urids();
+        let words = stream(&u, &[(0.25, &[1.0, 0.0, 1.0]), (0.5, &[0.5, 2.0, -1.0])]);
+        let buf: &[u8] = bytemuck::cast_slice(&words);
+        let frame = last_frame(buf, &u).expect("a frame");
+        assert_eq!((frame.channels, frame.position), (3, 0.5));
+        assert_eq!(frame.values().collect::<Vec<_>>(), [0.5, 2.0, -1.0]);
+        // No frame: a sequence of MIDI only, an empty one, a cut one
+        let words = stream(&u, &[]);
+        assert_eq!(last_frame(bytemuck::cast_slice(&words), &u), None);
+        let mut empty = [0u8; 64];
+        write_input(&mut empty, &u, None, &[]);
+        assert_eq!(last_frame(&empty, &u), None);
+        let words = stream(&u, &[(0.5, &[1.0; 12])]);
+        let buf: &[u8] = bytemuck::cast_slice(&words);
+        assert_eq!(last_frame(&buf[..80], &u), None);
+        // A size past the buffer stops the read, nothing more
+        let mut bad = buf.to_vec();
+        bad[0..4].copy_from_slice(&u32::MAX.to_ne_bytes());
+        assert_eq!(last_frame(&bad, &u), None);
     }
 }
